@@ -1,21 +1,21 @@
 #!/usr/bin/env node
 var fs = require('fs'),
 	connect = require('connect'),
-	colors = require('colors'),
 	WebSocket = require('faye-websocket'),
 	path = require('path'),
 	url = require('url'),
 	http = require('http'),
 	httpProxy = require('http-proxy'),
 	send = require('send'),
-	open = require('open'),
+	open = require('opn'),
 	es = require("event-stream"),
 	watchr = require('watchr');
+require('colors');
 
-var INJECTED_CODE = fs.readFileSync(__dirname + "/injected.html", "utf8");
+var INJECTED_CODE = fs.readFileSync(path.join(__dirname, "injected.html"), "utf8");
 
-var LiveServer = {};
-var proxy = httpProxy.createProxyServer();
+var LiveServer = {}, proxyServer;
+
 function escape(html){
 	return String(html)
 		.replace(/&(?!\w+;)/g, '&amp;')
@@ -29,24 +29,12 @@ proxy.on('error', function(err, req, res) {
 });
 
 // Based on connect.static(), but streamlined and with added code injecter
-function staticServer(root,proxyPathMap) {
+function staticServer(root) {
 	return function(req, res, next) {
-		if ('GET' != req.method && 'HEAD' != req.method) return next();
+		if (req.method !== "GET" && req.method !== "HEAD") return next();
 		var reqpath = url.parse(req.url).pathname;
 		var hasNoOrigin = !req.headers.origin;
 		var doInject = false;
-		var proxyToServerPath = findPathOnProxyPath(reqpath);
-
-		function findPathOnProxyPath(currentPath) {
-			var match = false;
-			Object.keys(proxyPathMap||{}).forEach( function(pathKey) {
-				if ( currentPath.indexOf(pathKey) === 0 ) {
-					//e.g. if currentPath(/some/where/out/there) starts with pathKey( /some )
-					match = proxyPathMap[pathKey];
-				}
-			});
-			return match;
-		}
 
 		function directory() {
 			var pathname = url.parse(req.originalUrl).pathname;
@@ -56,8 +44,9 @@ function staticServer(root,proxyPathMap) {
 		}
 
 		function file(filepath, stat) {
-			var x = path.extname(filepath);
-			if (hasNoOrigin && (x === "" || x == ".html" || x == ".htm" || x == ".xhtml" || x == ".php")) {
+			var x = path.extname(filepath).toLocaleLowerCase(),
+					possibleExtensions = ["", ".html", ".htm", ".xhtml", ".php"];
+			if (hasNoOrigin && (possibleExtensions.indexOf(x) > -1)) {
 				// TODO: Sync file read here is not nice, but we need to determine if the html should be injected or not
 				var contents = fs.readFileSync(filepath, "utf8");
 				doInject = contents.indexOf("</body>") > -1;
@@ -65,7 +54,7 @@ function staticServer(root,proxyPathMap) {
 		}
 
 		function error(err) {
-			if (404 == err.status) return next();
+			if (err.status === 404) return next();
 			next(err);
 		}
 
@@ -76,18 +65,9 @@ function staticServer(root,proxyPathMap) {
 				res.setHeader('Content-Length', len);
 				var originalPipe = stream.pipe;
 				stream.pipe = function(res) {
-					originalPipe.call(stream, es.replace(new RegExp("</body>","i"), INJECTED_CODE + "</body>")).pipe(res);
+					originalPipe.call(stream, es.replace(new RegExp("</body>", "i"), INJECTED_CODE + "</body>")).pipe(res);
 				};
 			}
-		}
-
-
-		if ( proxyToServerPath ) {
-			console.log("proxying: "+ reqpath + " -> " + proxyToServerPath);
-			proxy.web(req, res, {
-				target: proxyToServerPath
-			});
-			return;
 		}
 
 		send(req, reqpath, { root: root })
@@ -110,7 +90,7 @@ function entryPoint(staticHandler, file) {
 	return function(req, res, next) {
 		req.url = "/" + file;
 		staticHandler(req, res, next);
-	}
+	};
 }
 
 /**
@@ -126,7 +106,7 @@ function entryPoint(staticHandler, file) {
 LiveServer.start = function(options) {
 	options = options || {};
 	var host = options.host || '0.0.0.0';
-	var port = options.port || 8080;
+	var port = options.port !== undefined ? options.port : 8080; // 0 means random
 	var root = options.root || process.cwd();
 	var logLevel = options.logLevel === undefined ? 2 : options.logLevel;
 	var openPath = (options.open === undefined || options.open === true) ?
@@ -135,24 +115,58 @@ LiveServer.start = function(options) {
 	var file = options.file;
 
 	var wait = options.wait || 0;
-	var proxyPathArr = ( options.proxyPath || "" ).split(":");
-	var proxyPathMap;
 
-	if ( proxyPathArr && proxyPathArr.length === 2 ) {
-		proxyPathMap = (proxyPathArr||[""])[0].split(",").reduce(function(prev,current) {
-			prev[current] = 'http://' + host + ':' +  proxyPathArr[1];
-			return prev;
-		},{});
-	}
-	var staticServerHandler = staticServer(root,proxyPathMap);
+  var proxies = options.proxies || '';
+	proxies = (proxies && proxies.indexOf(',') === -1) ?
+              [proxies] : proxies.split(',');
 
-	if ( proxyPathMap ) {
-		console.log("Proxy Path Configuration-->");
-		console.log(proxyPathMap);
-	}
+  var proxyMap = [];
+  if(!(proxies.length === 1 && proxies[0] === '')) {
+    proxyMap = proxies.reduce(function(prev, curr) {
+      var mapping = curr.split('::');
+      if(mapping.length === 2) {
+        var obj = {};
+        obj.from = mapping[0];
+        obj.to = mapping[1];
+        prev.push(obj);
+      }
+      return prev;
+    }, []);
+
+    if(proxyMap.length > 0) {
+      proxyServer = httpProxy.createProxyServer();
+      console.log('Proxies configured: ' + JSON.stringify(proxyMap, null, 2));
+    }
+  }
+
+  var proxyHandler = function(req, res, next) {
+    var reqpath = url.parse(req.url).pathname;
+
+    var proxyMapping = proxyMap.filter(function(mapping) {
+      return reqpath.indexOf(mapping.from) === 0;
+    });
+
+    if(proxyMapping.length === 1) {
+      proxyMapping = proxyMapping[0];
+      var suffix = reqpath.substring(proxyMapping.from.length);
+      var target = proxyMapping.to + suffix;
+
+      console.info('Proxying from ' + req.url + ' to ' + target);
+      proxyServer.web(req, res, {
+        target: target
+      });
+    }
+    else {
+      next();
+    }
+
+  };
+
+	var staticServerHandler = staticServer(root, proxyMap);
 
 	// Setup a web server
 	var app = connect()
+    .use(proxyHandler)
 		.use(staticServerHandler) // Custom static server
 		.use(entryPoint(staticServerHandler, file))
 		.use(connect.directory(root, { icons: true }));
@@ -162,8 +176,8 @@ LiveServer.start = function(options) {
 
 	// Handle server startup errors
 	server.addListener('error', function(e) {
-		if (e.code == 'EADDRINUSE') {
-			var serveURL = 'http://' + host + ':' +  port;
+		if (e.code === 'EADDRINUSE') {
+			var serveURL = 'http://' + host + ':' + port;
 			console.log('%s is already in use. Trying another port.'.red, serveURL);
 			setTimeout(function() {
 				server.listen(0, host);
@@ -173,8 +187,9 @@ LiveServer.start = function(options) {
 
 	// Handle successful server
 	server.addListener('listening', function(e) {
-		var address = server.address(),
-			serveURL = 'http://' + address.address + ':' +  address.port;
+		var address = server.address();
+		var serveHost = address.address === "0.0.0.0" ? "127.0.0.1" : address.address;
+		var serveURL = 'http://' + serveHost + ':' + address.port;
 
 		// Output
 		if (logLevel >= 1) {
@@ -214,7 +229,7 @@ LiveServer.start = function(options) {
 			clients = clients.filter(function (x) {
 				return x !== ws;
 			});
-		}
+		};
 
 		clients.push(ws);
 	});
@@ -229,12 +244,12 @@ LiveServer.start = function(options) {
 		interval: 1407,
 		listeners: {
 			error: function(err) {
-				console.log("ERROR:".red , err);
+				console.log("ERROR:".red, err);
 			},
 			change: function(eventName, filePath, fileCurrentStat, filePreviousStat) {
 				clients.forEach(function(ws) {
 					if (!ws) return;
-					if (path.extname(filePath) == ".css") {
+					if (path.extname(filePath) === ".css") {
 						ws.send('refreshcss');
 						if (logLevel >= 1)
 							console.log("CSS change detected".magenta);
