@@ -149,9 +149,10 @@ LiveServer.start = function(options) {
     if(proxyMapping.length === 1) {
       proxyMapping = proxyMapping[0];
       var suffix = reqpath.substring(proxyMapping.from.length);
-      var target = proxyMapping.to + suffix;
+      var target = proxyMapping.to;
 
-      console.info('Proxying from ' + req.url + ' to ' + target);
+      console.info('Proxying from ' + req.url + ' to ' + target + suffix);
+      req.url = suffix;
       proxyServer.web(req, res, {
         target: target
       });
