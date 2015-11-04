@@ -140,7 +140,7 @@ LiveServer.start = function(options) {
   }
 
   var proxyHandler = function(req, res, next) {
-    var reqpath = url.parse(req.url).pathname;
+    var reqpath = url.parse(req.url).path;
 
     var proxyMapping = proxyMap.filter(function(mapping) {
       return reqpath.indexOf(mapping.from) === 0;
