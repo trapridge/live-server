@@ -24,10 +24,6 @@ function escape(html){
 		.replace(/"/g, '&quot;');
 }
 
-proxy.on('error', function(err, req, res) {
-    console.log(err);
-});
-
 // Based on connect.static(), but streamlined and with added code injecter
 function staticServer(root) {
 	return function(req, res, next) {
@@ -135,7 +131,11 @@ LiveServer.start = function(options) {
 
     if(proxyMap.length > 0) {
       proxyServer = httpProxy.createProxyServer();
-      console.log('Proxies configured: ' + JSON.stringify(proxyMap, null, 2));
+      proxyServer.on('error', function(err, req, res) {
+        console.error(err);
+      });
+
+      console.info('Proxies configured: ' + JSON.stringify(proxyMap, null, 2));
     }
   }
 
