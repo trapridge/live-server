@@ -257,7 +257,7 @@ LiveServer.start = function(options) {
 					} else {
 						ws.send('reload');
 						if (logLevel >= 1)
-							console.log("File change detected".cyan);
+							console.log("File change detected".cyan, filePath);
 					}
 				});
 			}
